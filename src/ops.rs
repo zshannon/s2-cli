@@ -170,10 +170,11 @@ pub async fn issue_access_token(
     s2: &S2,
     args: IssueAccessTokenArgs,
     config_token: Option<&str>,
+    config_root_key: Option<&str>,
 ) -> Result<String, CliError> {
     // Handle new auth with --public-key
     if let Some(ref public_key) = args.public_key {
-        return issue_access_token_new_auth(public_key.clone(), args, config_token).await;
+        return issue_access_token_new_auth(s2, public_key.clone(), args, config_token, config_root_key).await;
     }
 
     // Legacy path with --id
@@ -224,11 +225,12 @@ pub async fn issue_access_token(
 }
 
 async fn issue_access_token_new_auth(
+    s2: &S2,
     public_key: String,
     args: IssueAccessTokenArgs,
     config_token: Option<&str>,
+    config_root_key: Option<&str>,
 ) -> Result<String, CliError> {
-    use biscuit_auth::{builder::BlockBuilder, UnverifiedBiscuit};
     use crate::types::{BasinMatcher, StreamMatcher};
 
     // Validate public key format
@@ -242,15 +244,21 @@ async fn issue_access_token_new_auth(
         )));
     }
 
-    // For now, only offline attenuation is supported (requires existing token)
-    // Server-side issuance with root_key requires SDK changes
+    // Server-side issuance if root_key is configured
+    if config_root_key.is_some() {
+        return issue_access_token_server(s2, public_key, args).await;
+    }
+
+    // Offline attenuation if token is configured
     let base_token = config_token.ok_or_else(|| {
         CliError::InvalidArgs(miette::miette!(
-            "Issuing tokens with --public-key requires an existing token for offline attenuation.\n\
-             Configure with: s2 config set token <your-biscuit-token>\n\
-             (Server-side issuance with root_key coming in a future SDK update)"
+            "Issuing tokens with --public-key requires either:\n\
+             - root_key configured for server issuance: `s2 config set root_key <key>`\n\
+             - token configured for offline attenuation: `s2 config set token <token>`"
         ))
     })?;
+
+    use biscuit_auth::{builder::BlockBuilder, UnverifiedBiscuit};
 
     // Parse the Biscuit (without verification - we're just attenuating)
     let biscuit = UnverifiedBiscuit::from_base64(base_token)
@@ -343,6 +351,52 @@ async fn issue_access_token_new_auth(
     // Encode as base64
     Ok(attenuated.to_base64()
         .map_err(|e| CliError::InvalidArgs(miette::miette!("Failed to serialize token: {}", e)))?)
+}
+
+/// Issue access token via server call (requires root_key for signing)
+async fn issue_access_token_server(
+    s2: &S2,
+    public_key: String,
+    args: IssueAccessTokenArgs,
+) -> Result<String, CliError> {
+    let mut scope = AccessTokenScopeInput::from_ops(args.ops.into_iter().map(|op| op.into()));
+    if let Some(basins) = args.basins {
+        scope = scope.with_basins(basins.into());
+    }
+    if let Some(streams) = args.streams {
+        scope = scope.with_streams(streams.into());
+    }
+    if let Some(access_tokens) = args.access_tokens {
+        scope = scope.with_access_tokens(access_tokens.into());
+    }
+    if let Some(op_group_perms) = args.op_group_perms {
+        scope = scope.with_op_group_perms(op_group_perms.into());
+    }
+
+    let mut input = IssueAccessTokenInput::new_with_public_key(public_key, scope);
+    if let Some(expires_in) = args.expires_in {
+        let expiry_time = std::time::SystemTime::now() + *expires_in;
+        let rfc3339 = humantime::format_rfc3339(expiry_time).to_string();
+        let dt: S2DateTime = rfc3339.parse().map_err(|e| {
+            CliError::InvalidArgs(miette::miette!("Invalid expiration time: {}", e))
+        })?;
+        input = input.with_expires_at(dt);
+    } else if let Some(expires_at) = args.expires_at {
+        let dt: S2DateTime = expires_at.parse().map_err(|e| {
+            CliError::InvalidArgs(miette::miette!(
+                "Invalid expires_at (expected RFC3339 format, e.g., '2024-12-31T23:59:59Z'): {}",
+                e
+            ))
+        })?;
+        input = input.with_expires_at(dt);
+    }
+    if args.auto_prefix_streams {
+        input = input.with_auto_prefix_streams(true);
+    }
+
+    s2.issue_access_token(input)
+        .await
+        .map_err(|e| CliError::op(OpKind::IssueAccessToken, e))
 }
 
 pub async fn revoke_access_token(s2: &S2, id: AccessTokenId) -> Result<(), CliError> {

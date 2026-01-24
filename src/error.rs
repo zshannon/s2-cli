@@ -190,7 +190,15 @@ pub enum CliConfigError {
 
     #[error("Missing access token")]
     #[diagnostic(help(
-        "Run `s2 config set access_token <token>` or set the `S2_ACCESS_TOKEN` environment variable."
+        "Run `s2 config set access_token <token>` or set the `S2_ACCESS_TOKEN` environment variable.\n\
+         For new auth, set both `token` and `signing_key`."
     ))]
     MissingAccessToken,
+
+    #[error("Invalid signing key: {0}")]
+    #[diagnostic(help(
+        "The signing key should be a base58-encoded P-256 private key (32 bytes).\n\
+         Generate one with `s2 keygen`."
+    ))]
+    InvalidSigningKey(String),
 }

@@ -166,9 +166,11 @@ pub fn unset_config_value(key: ConfigKey) -> Result<PathBuf, CliConfigError> {
 }
 
 pub fn sdk_config(config: &CliConfig) -> Result<S2Config, CliError> {
-    let access_token = config
-        .access_token
+    // New auth: token + signing_key; Legacy: access_token
+    let bearer_token = config
+        .token
         .as_ref()
+        .or(config.access_token.as_ref())
         .ok_or(CliConfigError::MissingAccessToken)?;
 
     let compression: sdk::types::Compression = config
@@ -176,11 +178,18 @@ pub fn sdk_config(config: &CliConfig) -> Result<S2Config, CliError> {
         .map(Into::into)
         .unwrap_or(sdk::types::Compression::None);
 
-    let mut sdk_config = S2Config::new(access_token)
+    let mut sdk_config = S2Config::new(bearer_token)
         .with_user_agent("s2-cli")
         .map_err(|e| CliError::EndpointsFromEnv(e.to_string()))?
         .with_request_timeout(Duration::from_secs(30))
         .with_compression(compression);
+
+    // Add signing key if configured (enables RFC 9421 request signing)
+    if let Some(ref signing_key_str) = config.signing_key {
+        let signing_key = sdk::types::SigningKey::from_base58(signing_key_str)
+            .map_err(|e| CliConfigError::InvalidSigningKey(e.to_string()))?;
+        sdk_config = sdk_config.with_signing_key(signing_key);
+    }
 
     match (&config.account_endpoint, &config.basin_endpoint) {
         (Some(account), Some(basin)) => {
