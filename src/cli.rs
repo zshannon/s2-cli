@@ -275,9 +275,14 @@ pub struct ListAccessTokensArgs {
 
 #[derive(Args, Debug)]
 pub struct IssueAccessTokenArgs {
-    /// Access token ID.
-    #[arg(long)]
-    pub id: AccessTokenId,
+    /// Access token ID (legacy servers).
+    #[arg(long, conflicts_with = "public_key")]
+    pub id: Option<AccessTokenId>,
+
+    /// Client public key for request signing (base58 P-256, new auth).
+    /// Generate with `s2 keygen`.
+    #[arg(long, conflicts_with = "id")]
+    pub public_key: Option<String>,
 
     /// Token validity duration (e.g., "30d", "1w", "24h"). Token expires after this duration from now.
     #[arg(long, conflicts_with = "expires_at")]

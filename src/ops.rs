@@ -166,7 +166,23 @@ pub async fn list_access_tokens<'a>(
     }
 }
 
-pub async fn issue_access_token(s2: &S2, args: IssueAccessTokenArgs) -> Result<String, CliError> {
+pub async fn issue_access_token(
+    s2: &S2,
+    args: IssueAccessTokenArgs,
+    config_token: Option<&str>,
+) -> Result<String, CliError> {
+    // Handle new auth with --public-key
+    if let Some(ref public_key) = args.public_key {
+        return issue_access_token_new_auth(public_key.clone(), args, config_token).await;
+    }
+
+    // Legacy path with --id
+    let id = args.id.ok_or_else(|| {
+        CliError::InvalidArgs(miette::miette!(
+            "Either --id (legacy) or --public-key (new auth) is required"
+        ))
+    })?;
+
     let mut scope = AccessTokenScopeInput::from_ops(args.ops.into_iter().map(|op| op.into()));
     if let Some(basins) = args.basins {
         scope = scope.with_basins(basins.into());
@@ -181,7 +197,7 @@ pub async fn issue_access_token(s2: &S2, args: IssueAccessTokenArgs) -> Result<S
         scope = scope.with_op_group_perms(op_group_perms.into());
     }
 
-    let mut input = IssueAccessTokenInput::new(args.id, scope);
+    let mut input = IssueAccessTokenInput::new(id, scope);
     if let Some(expires_in) = args.expires_in {
         let expiry_time = std::time::SystemTime::now() + *expires_in;
         let rfc3339 = humantime::format_rfc3339(expiry_time).to_string();
@@ -205,6 +221,128 @@ pub async fn issue_access_token(s2: &S2, args: IssueAccessTokenArgs) -> Result<S
     s2.issue_access_token(input)
         .await
         .map_err(|e| CliError::op(OpKind::IssueAccessToken, e))
+}
+
+async fn issue_access_token_new_auth(
+    public_key: String,
+    args: IssueAccessTokenArgs,
+    config_token: Option<&str>,
+) -> Result<String, CliError> {
+    use biscuit_auth::{builder::BlockBuilder, UnverifiedBiscuit};
+    use crate::types::{BasinMatcher, StreamMatcher};
+
+    // Validate public key format
+    let pubkey_bytes = bs58::decode(&public_key)
+        .into_vec()
+        .map_err(|e| CliError::InvalidArgs(miette::miette!("Invalid public key: {}", e)))?;
+    if pubkey_bytes.len() != 33 {
+        return Err(CliError::InvalidArgs(miette::miette!(
+            "Invalid public key: expected 33 bytes (compressed P-256), got {}",
+            pubkey_bytes.len()
+        )));
+    }
+
+    // For now, only offline attenuation is supported (requires existing token)
+    // Server-side issuance with root_key requires SDK changes
+    let base_token = config_token.ok_or_else(|| {
+        CliError::InvalidArgs(miette::miette!(
+            "Issuing tokens with --public-key requires an existing token for offline attenuation.\n\
+             Configure with: s2 config set token <your-biscuit-token>\n\
+             (Server-side issuance with root_key coming in a future SDK update)"
+        ))
+    })?;
+
+    // Parse the Biscuit (without verification - we're just attenuating)
+    let biscuit = UnverifiedBiscuit::from_base64(base_token)
+        .map_err(|e| CliError::InvalidArgs(miette::miette!("Invalid Biscuit token: {}", e)))?;
+
+    // Create attenuation block
+    let mut block = BlockBuilder::new();
+
+    // Add public key binding for delegation
+    block
+        .add_code(format!("public_key(\"{}\");", public_key))
+        .map_err(|e| CliError::InvalidArgs(miette::miette!("Failed to add public_key fact: {}", e)))?;
+
+    // Add signer check to restrict usage to this key
+    block
+        .add_code(format!(
+            "check if signer($s), $s == \"{}\";",
+            public_key
+        ))
+        .map_err(|e| CliError::InvalidArgs(miette::miette!("Failed to add signer check: {}", e)))?;
+
+    // Add scope restrictions from args
+    if let Some(basins) = &args.basins {
+        let check = match basins {
+            BasinMatcher::Exact(name) => {
+                format!("check if basin($b), $b == \"{}\";", name)
+            }
+            BasinMatcher::Prefix(prefix) => {
+                format!("check if basin($b), $b.starts_with(\"{}\");", prefix)
+            }
+        };
+        block
+            .add_code(&check)
+            .map_err(|e| CliError::InvalidArgs(miette::miette!("Failed to add basin check: {}", e)))?;
+    }
+
+    if let Some(streams) = &args.streams {
+        let check = match streams {
+            StreamMatcher::Exact(name) => {
+                format!("check if stream($s), $s == \"{}\";", name)
+            }
+            StreamMatcher::Prefix(prefix) => {
+                format!("check if stream($s), $s.starts_with(\"{}\");", prefix)
+            }
+        };
+        block
+            .add_code(&check)
+            .map_err(|e| CliError::InvalidArgs(miette::miette!("Failed to add stream check: {}", e)))?;
+    }
+
+    // Add expiration if specified
+    if let Some(expires_in) = args.expires_in {
+        let expiry_time = std::time::SystemTime::now() + *expires_in;
+        let expiry_secs = expiry_time
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        block
+            .add_code(format!("check if time($t), $t < {};", expiry_secs))
+            .map_err(|e| CliError::InvalidArgs(miette::miette!("Failed to add expiry check: {}", e)))?;
+    } else if let Some(expires_at) = &args.expires_at {
+        // Parse RFC3339 to unix timestamp
+        let dt = humantime::parse_rfc3339(expires_at)
+            .map_err(|e| CliError::InvalidArgs(miette::miette!("Invalid expires_at: {}", e)))?;
+        let expiry_secs = dt
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        block
+            .add_code(format!("check if time($t), $t < {};", expiry_secs))
+            .map_err(|e| CliError::InvalidArgs(miette::miette!("Failed to add expiry check: {}", e)))?;
+    }
+
+    // Add operation restrictions if specified
+    if !args.ops.is_empty() {
+        let ops_list: Vec<String> = args.ops.iter().map(|op| format!("\"{}\"", op)).collect();
+        block
+            .add_code(format!(
+                "check if operation($op), [{}].contains($op);",
+                ops_list.join(", ")
+            ))
+            .map_err(|e| CliError::InvalidArgs(miette::miette!("Failed to add ops check: {}", e)))?;
+    }
+
+    // Attenuate the token
+    let attenuated = biscuit
+        .append(block)
+        .map_err(|e| CliError::InvalidArgs(miette::miette!("Failed to attenuate token: {}", e)))?;
+
+    // Encode as base64
+    Ok(attenuated.to_base64()
+        .map_err(|e| CliError::InvalidArgs(miette::miette!("Failed to serialize token: {}", e)))?)
 }
 
 pub async fn revoke_access_token(s2: &S2, id: AccessTokenId) -> Result<(), CliError> {

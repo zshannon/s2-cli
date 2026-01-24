@@ -246,7 +246,7 @@ async fn run() -> Result<(), CliError> {
         }
 
         Command::IssueAccessToken(args) => {
-            let token = ops::issue_access_token(&s2, args).await?;
+            let token = ops::issue_access_token(&s2, args, cli_config.token.as_deref()).await?;
             println!("{}", token);
         }
 
