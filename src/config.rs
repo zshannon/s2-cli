@@ -30,6 +30,9 @@ impl From<Compression> for sdk::types::Compression {
 #[serde(default)]
 pub struct CliConfig {
     pub access_token: Option<String>,
+    pub signing_key: Option<String>,
+    pub token: Option<String>,
+    pub root_key: Option<String>,
     pub account_endpoint: Option<String>,
     pub basin_endpoint: Option<String>,
     pub compression: Option<Compression>,
@@ -84,6 +87,9 @@ pub fn load_cli_config() -> Result<CliConfig, CliConfigError> {
 #[strum(serialize_all = "snake_case")]
 pub enum ConfigKey {
     AccessToken,
+    SigningKey,
+    Token,
+    RootKey,
     AccountEndpoint,
     BasinEndpoint,
     Compression,
@@ -93,6 +99,9 @@ impl CliConfig {
     pub fn get(&self, key: ConfigKey) -> Option<String> {
         match key {
             ConfigKey::AccessToken => self.access_token.clone(),
+            ConfigKey::SigningKey => self.signing_key.clone(),
+            ConfigKey::Token => self.token.clone(),
+            ConfigKey::RootKey => self.root_key.clone(),
             ConfigKey::AccountEndpoint => self.account_endpoint.clone(),
             ConfigKey::BasinEndpoint => self.basin_endpoint.clone(),
             ConfigKey::Compression => self.compression.map(|c| c.to_string()),
@@ -102,6 +111,9 @@ impl CliConfig {
     pub fn set(&mut self, key: ConfigKey, value: String) -> Result<(), CliConfigError> {
         match key {
             ConfigKey::AccessToken => self.access_token = Some(value),
+            ConfigKey::SigningKey => self.signing_key = Some(value),
+            ConfigKey::Token => self.token = Some(value),
+            ConfigKey::RootKey => self.root_key = Some(value),
             ConfigKey::AccountEndpoint => self.account_endpoint = Some(value),
             ConfigKey::BasinEndpoint => self.basin_endpoint = Some(value),
             ConfigKey::Compression => {
@@ -118,6 +130,9 @@ impl CliConfig {
     pub fn unset(&mut self, key: ConfigKey) {
         match key {
             ConfigKey::AccessToken => self.access_token = None,
+            ConfigKey::SigningKey => self.signing_key = None,
+            ConfigKey::Token => self.token = None,
+            ConfigKey::RootKey => self.root_key = None,
             ConfigKey::AccountEndpoint => self.account_endpoint = None,
             ConfigKey::BasinEndpoint => self.basin_endpoint = None,
             ConfigKey::Compression => self.compression = None,

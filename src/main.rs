@@ -108,12 +108,20 @@ async fn run() -> Result<(), CliError> {
         return Ok(());
     }
 
+    if let Command::Keygen = &commands.command {
+        let keypair = ops::keygen();
+        println!("public_key={}", keypair.public_key);
+        println!("private_key={}", keypair.private_key);
+        return Ok(());
+    }
+
     let cli_config = load_cli_config()?;
     let sdk_config = sdk_config(&cli_config)?;
     let s2 = S2::new(sdk_config.clone()).map_err(CliError::SdkInit)?;
 
     match commands.command {
         Command::Config(..) => unreachable!(),
+        Command::Keygen => unreachable!(),
 
         Command::Ls(args) => {
             if let Some(ref uri) = args.uri {

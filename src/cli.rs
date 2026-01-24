@@ -152,6 +152,13 @@ pub enum Command {
 
     /// Benchmark a stream to measure throughput and latency.
     Bench(BenchArgs),
+
+    /// Generate a P-256 keypair for request signing.
+    ///
+    /// Outputs a public/private keypair in base58 format.
+    /// Use the public key when issuing tokens, and configure
+    /// the private key as signing_key for authentication.
+    Keygen,
 }
 
 #[derive(Subcommand, Debug)]

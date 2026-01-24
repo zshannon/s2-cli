@@ -639,3 +639,29 @@ fn time_range_and_interval(
     }
     range
 }
+
+/// Generated P-256 keypair in base58 format.
+pub struct Keypair {
+    pub public_key: String,
+    pub private_key: String,
+}
+
+/// Generate a P-256 keypair for request signing.
+pub fn keygen() -> Keypair {
+    use p256::ecdsa::SigningKey;
+    use p256::elliptic_curve::rand_core::OsRng;
+
+    let signing_key = SigningKey::random(&mut OsRng);
+    let verifying_key = signing_key.verifying_key();
+
+    // Private key: 32-byte scalar, base58 encoded
+    let private_key = bs58::encode(signing_key.to_bytes()).into_string();
+
+    // Public key: compressed point (33 bytes), base58 encoded
+    let public_key = bs58::encode(verifying_key.to_encoded_point(true).as_bytes()).into_string();
+
+    Keypair {
+        public_key,
+        private_key,
+    }
+}
