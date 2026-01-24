@@ -2683,6 +2683,7 @@ checksum = "a50f4cf475b65d88e057964e0e9bb1f0aa9bbb2036dc65c64596b42932536984"
 [[package]]
 name = "s2-api"
 version = "0.3.5"
+source = "git+https://github.com/zshannon/s2.git?branch=feature%2Fpki-authorization#04d218e7f0012234a81929f191a9d9ddbb97d4d0"
 dependencies = [
  "base64ct",
  "bytes",
@@ -2749,6 +2750,7 @@ dependencies = [
 [[package]]
 name = "s2-common"
 version = "0.3.5"
+source = "git+https://github.com/zshannon/s2.git?branch=feature%2Fpki-authorization#04d218e7f0012234a81929f191a9d9ddbb97d4d0"
 dependencies = [
  "blake3",
  "bytes",
@@ -2765,6 +2767,7 @@ dependencies = [
 [[package]]
 name = "s2-sdk"
 version = "0.23.0"
+source = "git+https://github.com/zshannon/s2-sdk-rust.git#a5f107b5f909dae33a88bd2adcff13dec87d59a4"
 dependencies = [
  "async-compression",
  "async-stream",

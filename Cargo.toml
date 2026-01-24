@@ -31,7 +31,7 @@ json_to_table = "0.12.0"
 miette = { version = "7.6.0", features = ["fancy"] }
 p256 = { version = "0.13", features = ["ecdsa"] }
 rand = "0.9.2"
-s2-sdk = { path = "../s2-sdk-rust", features = ["_hidden"] }
+s2-sdk = { git = "https://github.com/zshannon/s2-sdk-rust.git", features = ["_hidden"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.149", features = ["preserve_order"] }
 strum = { version = "0.27", features = ["derive"] }
