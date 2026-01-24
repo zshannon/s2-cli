@@ -21,7 +21,7 @@ Support for Biscuit tokens and RFC 9421 HTTP Message Signatures in the s2 CLI.
 signing_key = "base58-p256-private-key"  # ~44 chars
 token = "base64-biscuit-token"
 
-# Admin auth (for token management)
+# Admin bootstrap (creates admin token on-the-fly)
 root_key = "base58-p256-private-key"
 
 # Existing keys (legacy + endpoints)
@@ -81,9 +81,13 @@ s2 issue-access-token --public-key 3ABcd8UV... --basins "x/subset/*" --ops read
 | `--id` | `--public-key` | `root_key` | `token` | Behavior |
 |--------|----------------|------------|---------|----------|
 | yes | - | - | - | Legacy server call |
-| - | yes | yes | - | New server call |
+| - | yes | yes | - | Server call (admin bootstrap) |
 | - | yes | - | yes | Offline attenuation |
 | - | yes | - | - | Error: missing auth |
+
+> **Note:** When `root_key` is configured alone (without `token` or `access_token`),
+> the CLI creates an admin Biscuit token on-the-fly with full permissions. This
+> enables bootstrap mode for self-hosted deployments.
 
 **Offline attenuation** creates a Biscuit attenuation block with:
 - `public_key("<new-client-pubkey>")` fact
@@ -107,13 +111,31 @@ S2Config::new(access_token)
 
 ```rust
 pub fn sdk_config(config: &CliConfig) -> Result<S2Config, CliError> {
-    if let (Some(key), Some(token)) = (&config.signing_key, &config.token) {
-        Ok(S2Config::new(token).with_signing_key(parse_key(key)?))
-    } else if let Some(access_token) = &config.access_token {
-        Ok(S2Config::new(access_token))
-    } else {
-        Err(CliConfigError::MissingAuth.into())
+    // Root key bootstrap: create admin Biscuit on-the-fly
+    if let Some(root_key) = &config.root_key {
+        if config.token.is_none() && config.access_token.is_none() {
+            let (admin_token, signing_key) = create_admin_token(root_key)?;
+            return Ok(S2Config::new(&admin_token).with_signing_key(signing_key));
+        }
     }
+
+    // Validate signing_key + token pairing
+    match (&config.signing_key, &config.token) {
+        (Some(_), None) => return Err(MissingToken),
+        (None, Some(_)) => return Err(MissingSigningKey),
+        _ => {}
+    }
+
+    // New auth (token + signing_key) or legacy (access_token)
+    let bearer = config.token.as_ref()
+        .or(config.access_token.as_ref())
+        .ok_or(MissingAccessToken)?;
+
+    let mut sdk_config = S2Config::new(bearer);
+    if let Some(key) = &config.signing_key {
+        sdk_config = sdk_config.with_signing_key(parse_key(key)?);
+    }
+    Ok(sdk_config)
 }
 ```
 
@@ -132,18 +154,25 @@ Commands don't change - SDK handles signing transparently.
 
 ## User Flows
 
-### Initial Setup (Admin)
+### Initial Setup (Admin Bootstrap)
+
+For self-hosted deployments, the admin can bootstrap with just the root key:
 
 ```bash
-# Generate root key (one-time)
+# Generate root key (one-time, shared with server)
 s2 keygen
 # → public_key=ROOT_PUB private_key=ROOT_PRIV
 
-# Configure server with ROOT_PRIV
-# Server derives ROOT_PUB for token verification
+# Configure server with ROOT_PRIV (server-side setup)
+# Server uses this to verify admin tokens
 
-# Configure CLI for admin operations
+# Configure CLI for admin operations (bootstrap mode)
 s2 config set root_key ROOT_PRIV
+s2 config set account_endpoint https://your-server:8080
+s2 config set basin_endpoint https://your-server:8081
+
+# CLI now creates admin Biscuit tokens on-the-fly for all operations
+s2 list-basins  # Works immediately, no pre-issued token needed
 ```
 
 ### Issue Token for Client

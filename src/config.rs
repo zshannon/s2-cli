@@ -1,13 +1,98 @@
 use std::{path::PathBuf, time::Duration};
 
+use biscuit_auth::{KeyPair, PrivateKey, builder::{Algorithm, BiscuitBuilder}};
 use config::{Config, FileFormat};
 use s2_sdk::{
     self as sdk,
-    types::{S2Config, S2Endpoints},
+    types::{AccountEndpoint, BasinEndpoint, S2Config, S2Endpoints},
 };
 use serde::{Deserialize, Serialize};
 
 use crate::error::{CliConfigError, CliError};
+
+/// Create an admin Biscuit token on-the-fly using the root key.
+/// This enables bootstrap mode where the admin can operate without a pre-existing token.
+/// Returns (base64_token, signing_key).
+fn create_admin_token(root_key_str: &str) -> Result<(String, sdk::types::SigningKey), CliError> {
+    use base64ct::Encoding;
+    use p256::ecdsa::SigningKey;
+
+    // Parse root key from base58
+    let key_bytes = bs58::decode(root_key_str)
+        .into_vec()
+        .map_err(|e| CliConfigError::InvalidSigningKey(format!("base58 decode: {}", e)))?;
+
+    if key_bytes.len() != 32 {
+        return Err(CliConfigError::InvalidSigningKey(format!(
+            "expected 32 bytes, got {}",
+            key_bytes.len()
+        ))
+        .into());
+    }
+
+    // Create P-256 signing key
+    let p256_key = SigningKey::from_bytes((&key_bytes[..]).into())
+        .map_err(|e| CliConfigError::InvalidSigningKey(e.to_string()))?;
+
+    // Derive public key for the token
+    let public_key = p256_key.verifying_key();
+    let public_key_base58 = bs58::encode(public_key.to_encoded_point(true).as_bytes()).into_string();
+
+    // Create Biscuit keypair from root key
+    let biscuit_private = PrivateKey::from_bytes(&key_bytes, Algorithm::Secp256r1)
+        .map_err(|e| CliConfigError::InvalidSigningKey(format!("biscuit key: {}", e)))?;
+    let biscuit_keypair = KeyPair::from(&biscuit_private);
+
+    // Build admin Biscuit with full permissions
+    let mut builder = BiscuitBuilder::new();
+
+    // Bind to root key's public key
+    builder = builder
+        .fact(format!("public_key(\"{}\")", public_key_base58).as_str())
+        .map_err(|e| CliConfigError::InvalidSigningKey(format!("biscuit fact: {}", e)))?;
+
+    // Set expiration (1 hour from now)
+    let expires_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 3600;
+    builder = builder
+        .fact(format!("expires({})", expires_ts).as_str())
+        .map_err(|e| CliConfigError::InvalidSigningKey(format!("biscuit expires: {}", e)))?;
+    builder = builder
+        .check(format!("check if time($t), $t < {}", expires_ts).as_str())
+        .map_err(|e| CliConfigError::InvalidSigningKey(format!("biscuit check: {}", e)))?;
+
+    // Grant full admin permissions (all op_groups read+write)
+    builder = builder.fact("op_group(\"account\", \"read\")").unwrap();
+    builder = builder.fact("op_group(\"account\", \"write\")").unwrap();
+    builder = builder.fact("op_group(\"basin\", \"read\")").unwrap();
+    builder = builder.fact("op_group(\"basin\", \"write\")").unwrap();
+    builder = builder.fact("op_group(\"stream\", \"read\")").unwrap();
+    builder = builder.fact("op_group(\"stream\", \"write\")").unwrap();
+
+    // No resource restrictions (full access)
+    builder = builder.fact("basin_scope(\"prefix\", \"\")").unwrap();
+    builder = builder.fact("stream_scope(\"prefix\", \"\")").unwrap();
+    builder = builder.fact("access_token_scope(\"prefix\", \"\")").unwrap();
+
+    // Build and serialize
+    let biscuit = builder
+        .build(&biscuit_keypair)
+        .map_err(|e| CliConfigError::InvalidSigningKey(format!("biscuit build: {}", e)))?;
+
+    let token_bytes = biscuit
+        .to_vec()
+        .map_err(|e| CliConfigError::InvalidSigningKey(format!("biscuit serialize: {}", e)))?;
+    let token_base64 = base64ct::Base64::encode_string(&token_bytes);
+
+    // Create SDK signing key
+    let signing_key = sdk::types::SigningKey::from_base58(root_key_str)
+        .map_err(|e| CliConfigError::InvalidSigningKey(e.to_string()))?;
+
+    Ok((token_base64, signing_key))
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, strum::Display, strum::EnumString)]
 #[serde(rename_all = "lowercase")]
@@ -166,17 +251,59 @@ pub fn unset_config_value(key: ConfigKey) -> Result<PathBuf, CliConfigError> {
 }
 
 pub fn sdk_config(config: &CliConfig) -> Result<S2Config, CliError> {
+    // Determine auth mode:
+    // 1. root_key alone -> create admin Biscuit on-the-fly (bootstrap mode)
+    // 2. token + signing_key -> new auth
+    // 3. access_token -> legacy auth
+
+    let compression: sdk::types::Compression = config
+        .compression
+        .map(Into::into)
+        .unwrap_or(sdk::types::Compression::None);
+
+    // Root key bootstrap mode: create admin Biscuit on-the-fly
+    if let Some(ref root_key_str) = config.root_key {
+        if config.token.is_none() && config.access_token.is_none() {
+            let (admin_token, signing_key) = create_admin_token(root_key_str)?;
+
+            let mut sdk_config = S2Config::new(&admin_token)
+                .with_user_agent("s2-cli")
+                .map_err(|e| CliError::EndpointsFromEnv(e.to_string()))?
+                .with_request_timeout(Duration::from_secs(30))
+                .with_compression(compression)
+                .with_signing_key(signing_key);
+
+            if let (Some(account), Some(basin)) = (&config.account_endpoint, &config.basin_endpoint) {
+                let account_endpoint = AccountEndpoint::new(account)
+                    .map_err(|e| CliError::EndpointsFromEnv(e.to_string()))?;
+                let basin_endpoint = BasinEndpoint::new(basin)
+                    .map_err(|e| CliError::EndpointsFromEnv(e.to_string()))?;
+                let endpoints = S2Endpoints::new(account_endpoint, basin_endpoint)
+                    .map_err(|e| CliError::EndpointsFromEnv(e.to_string()))?;
+                sdk_config = sdk_config.with_endpoints(endpoints);
+            }
+
+            return Ok(sdk_config);
+        }
+    }
+
+    // Validate signing_key + token pairing (both required together for new auth)
+    match (&config.signing_key, &config.token) {
+        (Some(_), None) => {
+            return Err(CliConfigError::MissingToken.into());
+        }
+        (None, Some(_)) => {
+            return Err(CliConfigError::MissingSigningKey.into());
+        }
+        _ => {}
+    }
+
     // New auth: token + signing_key; Legacy: access_token
     let bearer_token = config
         .token
         .as_ref()
         .or(config.access_token.as_ref())
         .ok_or(CliConfigError::MissingAccessToken)?;
-
-    let compression: sdk::types::Compression = config
-        .compression
-        .map(Into::into)
-        .unwrap_or(sdk::types::Compression::None);
 
     let mut sdk_config = S2Config::new(bearer_token)
         .with_user_agent("s2-cli")
@@ -193,7 +320,11 @@ pub fn sdk_config(config: &CliConfig) -> Result<S2Config, CliError> {
 
     match (&config.account_endpoint, &config.basin_endpoint) {
         (Some(account), Some(basin)) => {
-            let endpoints = S2Endpoints::parse_from(account, basin)
+            let account_endpoint = AccountEndpoint::new(account)
+                .map_err(|e| CliError::EndpointsFromEnv(e.to_string()))?;
+            let basin_endpoint = BasinEndpoint::new(basin)
+                .map_err(|e| CliError::EndpointsFromEnv(e.to_string()))?;
+            let endpoints = S2Endpoints::new(account_endpoint, basin_endpoint)
                 .map_err(|e| CliError::EndpointsFromEnv(e.to_string()))?;
             sdk_config = sdk_config.with_endpoints(endpoints);
         }

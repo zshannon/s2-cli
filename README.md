@@ -31,19 +31,97 @@ Command Line Interface to interact with the
 
 1. [Install](#installation) the S2 CLI using your preferred method.
 
-1. Generate an access token by logging into the web console at
-   [s2.dev](https://s2.dev/dashboard) and set the token in CLI config:
+2. Configure authentication (see [Authentication](#authentication) for options):
    ```bash
+   # Simple: Use an access token from the web console
    s2 config set access_token <YOUR_ACCESS_TOKEN>
    ```
 
-1. You're ready to run S2 commands!
+3. You're ready to run S2 commands!
    ```bash
    s2 list-basins
    ```
 
 Head over to [S2 Docs](https://s2.dev/docs/quickstart) for a quick dive into
 using the CLI.
+
+## Authentication
+
+The CLI supports multiple authentication methods, from simple access tokens to
+cryptographic request signing.
+
+### Access Token (Legacy)
+
+The simplest method. Generate a token from the [web console](https://s2.dev/dashboard):
+
+```bash
+s2 config set access_token <YOUR_ACCESS_TOKEN>
+```
+
+### Request Signing (Recommended)
+
+For enhanced security, use RFC 9421 HTTP Message Signatures with Biscuit tokens.
+This method cryptographically signs each request with a P-256 keypair.
+
+1. Generate a keypair:
+   ```bash
+   s2 keygen
+   # Output:
+   # public_key=<BASE58_PUBLIC_KEY>
+   # private_key=<BASE58_PRIVATE_KEY>
+   ```
+
+2. Get a token issued with your public key (via web console or existing token).
+
+3. Configure both the token and signing key:
+   ```bash
+   s2 config set token <YOUR_BISCUIT_TOKEN>
+   s2 config set signing_key <YOUR_PRIVATE_KEY>
+   ```
+
+Both `token` and `signing_key` must be configured together.
+
+### Root Key (Admin Bootstrap)
+
+For self-hosted deployments, administrators with the root key can operate
+without pre-existing tokens. The CLI creates an admin token on-the-fly:
+
+```bash
+s2 config set root_key <ROOT_PRIVATE_KEY>
+# Optionally set custom endpoints for self-hosted
+s2 config set account_endpoint <ACCOUNT_ENDPOINT>
+s2 config set basin_endpoint <BASIN_ENDPOINT>
+```
+
+### Token Delegation
+
+You can create restricted tokens from an existing token (offline attenuation):
+
+```bash
+# Generate a keypair for the delegate
+s2 keygen
+# public_key=<DELEGATE_PUBLIC_KEY>
+# private_key=<DELEGATE_PRIVATE_KEY>
+
+# Issue a restricted token (requires token + signing_key configured)
+s2 issue-access-token --public-key <DELEGATE_PUBLIC_KEY> \
+  --basins "prefix-" --expires-in 7d --ops read,append
+```
+
+### Configuration Reference
+
+| Key | Description |
+|-----|-------------|
+| `access_token` | Legacy bearer token |
+| `token` | Biscuit token (requires `signing_key`) |
+| `signing_key` | P-256 private key for request signing (requires `token`) |
+| `root_key` | Root private key for admin bootstrap mode |
+| `account_endpoint` | Custom account service endpoint |
+| `basin_endpoint` | Custom basin service endpoint |
+| `compression` | Request compression: `gzip` or `zstd` |
+
+Configuration can also be set via environment variables with `S2_` prefix
+(e.g., `S2_TOKEN`, `S2_SIGNING_KEY`).
 
 ## Commands and reference
 

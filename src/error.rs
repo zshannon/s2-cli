@@ -195,6 +195,21 @@ pub enum CliConfigError {
     ))]
     MissingAccessToken,
 
+    #[error("signing_key is set but token is missing")]
+    #[diagnostic(help(
+        "Both signing_key and token are required for signed authentication.\n\
+         Run `s2 config set token <biscuit-token>` to set the token."
+    ))]
+    MissingToken,
+
+    #[error("token is set but signing_key is missing")]
+    #[diagnostic(help(
+        "Both signing_key and token are required for signed authentication.\n\
+         Run `s2 config set signing_key <key>` to set the signing key.\n\
+         Generate a keypair with `s2 keygen`."
+    ))]
+    MissingSigningKey,
+
     #[error("Invalid signing key: {0}")]
     #[diagnostic(help(
         "The signing key should be a base58-encoded P-256 private key (32 bytes).\n\

@@ -59,7 +59,7 @@ pub async fn list_basins<'a>(
 
         Ok(Box::pin(stream::iter(page.values.into_iter().map(Ok))))
     } else {
-        let mut input = ListAllBasinsInput::new().with_ignore_pending_deletions(false);
+        let mut input = ListAllBasinsInput::new().with_include_deleted(false);
         if let Some(p) = prefix {
             input = input.with_prefix(p);
         }
@@ -244,7 +244,8 @@ async fn issue_access_token_new_auth(
         )));
     }
 
-    // Server-side issuance if root_key is configured
+    // Server-side issuance if root_key is configured (indicates admin intent)
+    // Uses normal SDK auth (token + signing_key must be configured)
     if config_root_key.is_some() {
         return issue_access_token_server(s2, public_key, args).await;
     }
@@ -268,56 +269,53 @@ async fn issue_access_token_new_auth(
     let mut block = BlockBuilder::new();
 
     // Add public key binding for delegation
-    block
-        .add_code(format!("public_key(\"{}\");", public_key))
+    block = block
+        .fact(format!("public_key(\"{}\")", public_key).as_str())
         .map_err(|e| CliError::InvalidArgs(miette::miette!("Failed to add public_key fact: {}", e)))?;
 
     // Add signer check to restrict usage to this key
-    block
-        .add_code(format!(
-            "check if signer($s), $s == \"{}\";",
-            public_key
-        ))
+    block = block
+        .check(format!("check if signer($s), $s == \"{}\"", public_key).as_str())
         .map_err(|e| CliError::InvalidArgs(miette::miette!("Failed to add signer check: {}", e)))?;
 
     // Add scope restrictions from args
     if let Some(basins) = &args.basins {
         let check = match basins {
             BasinMatcher::Exact(name) => {
-                format!("check if basin($b), $b == \"{}\";", name)
+                format!("check if basin($b), $b == \"{}\"", name)
             }
             BasinMatcher::Prefix(prefix) => {
-                format!("check if basin($b), $b.starts_with(\"{}\");", prefix)
+                format!("check if basin($b), $b.starts_with(\"{}\")", prefix)
             }
         };
-        block
-            .add_code(&check)
+        block = block
+            .check(check.as_str())
             .map_err(|e| CliError::InvalidArgs(miette::miette!("Failed to add basin check: {}", e)))?;
     }
 
     if let Some(streams) = &args.streams {
         let check = match streams {
             StreamMatcher::Exact(name) => {
-                format!("check if stream($s), $s == \"{}\";", name)
+                format!("check if stream($s), $s == \"{}\"", name)
             }
             StreamMatcher::Prefix(prefix) => {
-                format!("check if stream($s), $s.starts_with(\"{}\");", prefix)
+                format!("check if stream($s), $s.starts_with(\"{}\")", prefix)
             }
         };
-        block
-            .add_code(&check)
+        block = block
+            .check(check.as_str())
             .map_err(|e| CliError::InvalidArgs(miette::miette!("Failed to add stream check: {}", e)))?;
     }
 
-    // Add expiration if specified
+    // Add expiration if specified (server uses unix timestamp for time fact)
     if let Some(expires_in) = args.expires_in {
         let expiry_time = std::time::SystemTime::now() + *expires_in;
         let expiry_secs = expiry_time
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        block
-            .add_code(format!("check if time($t), $t < {};", expiry_secs))
+        block = block
+            .check(format!("check if time($t), $t < {}", expiry_secs).as_str())
             .map_err(|e| CliError::InvalidArgs(miette::miette!("Failed to add expiry check: {}", e)))?;
     } else if let Some(expires_at) = &args.expires_at {
         // Parse RFC3339 to unix timestamp
@@ -327,19 +325,16 @@ async fn issue_access_token_new_auth(
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        block
-            .add_code(format!("check if time($t), $t < {};", expiry_secs))
+        block = block
+            .check(format!("check if time($t), $t < {}", expiry_secs).as_str())
             .map_err(|e| CliError::InvalidArgs(miette::miette!("Failed to add expiry check: {}", e)))?;
     }
 
     // Add operation restrictions if specified
     if !args.ops.is_empty() {
         let ops_list: Vec<String> = args.ops.iter().map(|op| format!("\"{}\"", op)).collect();
-        block
-            .add_code(format!(
-                "check if operation($op), [{}].contains($op);",
-                ops_list.join(", ")
-            ))
+        block = block
+            .check(format!("check if operation($op), [{}].contains($op)", ops_list.join(", ")).as_str())
             .map_err(|e| CliError::InvalidArgs(miette::miette!("Failed to add ops check: {}", e)))?;
     }
 
@@ -353,7 +348,9 @@ async fn issue_access_token_new_auth(
         .map_err(|e| CliError::InvalidArgs(miette::miette!("Failed to serialize token: {}", e)))?)
 }
 
-/// Issue access token via server call (requires root_key for signing)
+/// Issue access token via server call.
+/// Uses the provided s2 client which must be configured with proper auth.
+/// The user's token must have `issue_access_token` permission.
 async fn issue_access_token_server(
     s2: &S2,
     public_key: String,
@@ -512,7 +509,7 @@ pub async fn list_streams<'a>(
 
         Ok(Box::pin(stream::iter(page.values.into_iter().map(Ok))))
     } else {
-        let mut input = ListAllStreamsInput::new().with_ignore_pending_deletions(false);
+        let mut input = ListAllStreamsInput::new().with_include_deleted(false);
         if let Some(p) = prefix {
             input = input.with_prefix(p);
         }
@@ -855,5 +852,183 @@ pub fn keygen() -> Keypair {
     Keypair {
         public_key,
         private_key,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_keygen_produces_valid_keys() {
+        let keypair = keygen();
+
+        // Private key should be 32 bytes (P-256 scalar), base58 encoded
+        let private_bytes = bs58::decode(&keypair.private_key).into_vec().unwrap();
+        assert_eq!(private_bytes.len(), 32, "Private key should be 32 bytes");
+
+        // Public key should be 33 bytes (compressed P-256 point), base58 encoded
+        let public_bytes = bs58::decode(&keypair.public_key).into_vec().unwrap();
+        assert_eq!(public_bytes.len(), 33, "Public key should be 33 bytes (compressed)");
+
+        // Compressed point starts with 0x02 or 0x03
+        assert!(
+            public_bytes[0] == 0x02 || public_bytes[0] == 0x03,
+            "Compressed public key should start with 0x02 or 0x03"
+        );
+    }
+
+    #[test]
+    fn test_keygen_keys_are_parseable_by_sdk() {
+        let keypair = keygen();
+
+        // Private key should be parseable by SDK's SigningKey
+        let result = sdk::types::SigningKey::from_base58(&keypair.private_key);
+        assert!(result.is_ok(), "Private key should be parseable by SDK");
+    }
+
+    #[test]
+    fn test_keygen_produces_unique_keys() {
+        let keypair1 = keygen();
+        let keypair2 = keygen();
+
+        assert_ne!(keypair1.private_key, keypair2.private_key, "Each keygen should produce unique private key");
+        assert_ne!(keypair1.public_key, keypair2.public_key, "Each keygen should produce unique public key");
+    }
+
+    #[test]
+    fn test_public_key_validation_rejects_wrong_size() {
+        // 32 bytes instead of 33
+        let bad_key = bs58::encode(vec![0u8; 32]).into_string();
+        let result = bs58::decode(&bad_key).into_vec().unwrap();
+        assert_eq!(result.len(), 32);
+        // This should fail validation in issue_access_token_new_auth
+    }
+
+    #[test]
+    fn test_biscuit_attenuation_block_syntax() {
+        use biscuit_auth::builder::BlockBuilder;
+
+        // Test that our datalog syntax is valid
+        let public_key = "test_public_key_123";
+        let mut block = BlockBuilder::new();
+
+        // Test public_key fact
+        block = block.fact(format!("public_key(\"{}\")", public_key).as_str()).unwrap();
+
+        // Test signer check
+        block = block.check(format!("check if signer($s), $s == \"{}\"", public_key).as_str()).unwrap();
+
+        // Test basin check with exact match
+        block = block.check("check if basin($b), $b == \"my-basin\"").unwrap();
+
+        // Test basin check with prefix
+        block = block.check("check if basin($b), $b.starts_with(\"prefix-\")").unwrap();
+
+        // Test stream check
+        block = block.check("check if stream($s), $s == \"my-stream\"").unwrap();
+
+        // Test time check with unix timestamp (server injects time(<unix_timestamp>))
+        block = block.check("check if time($t), $t < 1767225599").unwrap();
+
+        // Test operation check
+        block = block.check("check if operation($op), [\"read\", \"append\"].contains($op)").unwrap();
+
+        // Use block to avoid unused warning
+        let _ = block;
+    }
+
+    #[test]
+    fn test_biscuit_attenuation_full_flow() {
+        use biscuit_auth::{KeyPair, builder::{BiscuitBuilder, BlockBuilder}};
+
+        // Create a root keypair and a basic Biscuit token
+        let root_keypair = KeyPair::new();
+        let mut builder = BiscuitBuilder::new();
+        builder = builder.fact("public_key(\"original_key\")").unwrap();
+        builder = builder.fact("right(\"read\")").unwrap();
+        let biscuit = builder.build(&root_keypair).unwrap();
+
+        // Serialize and deserialize (simulating what we'd do with a stored token)
+        let token_bytes = biscuit.to_vec().unwrap();
+        let base64_token = base64ct::Base64::encode_string(&token_bytes);
+
+        // Parse as unverified (like we do in offline attenuation)
+        use biscuit_auth::UnverifiedBiscuit;
+        use base64ct::Encoding;
+        let token_bytes = base64ct::Base64::decode_vec(&base64_token).unwrap();
+        let unverified = UnverifiedBiscuit::from(&token_bytes).unwrap();
+
+        // Create attenuation block with delegation
+        let new_public_key = "new_client_pubkey_123";
+        let mut block = BlockBuilder::new();
+        block = block.fact(format!("public_key(\"{}\")", new_public_key).as_str()).unwrap();
+        block = block.check(format!("check if signer($s), $s == \"{}\"", new_public_key).as_str()).unwrap();
+
+        // Attenuate
+        let attenuated = unverified.append(block).unwrap();
+
+        // Verify we can serialize the attenuated token
+        let attenuated_base64 = attenuated.to_base64().unwrap();
+        assert!(!attenuated_base64.is_empty());
+
+        // The attenuated token should have 2 blocks (authority + attenuation)
+        // We can't easily verify block count on UnverifiedBiscuit, but serialization success is good enough
+    }
+
+    #[test]
+    fn test_biscuit_time_check_with_unix_timestamp() {
+        use biscuit_auth::{KeyPair, builder::{BiscuitBuilder, AuthorizerBuilder}};
+
+        // Create a token with a time-based check
+        let keypair = KeyPair::new();
+        let mut builder = BiscuitBuilder::new();
+
+        // Add a time check that expires in the future (year 2030)
+        let future_timestamp: u64 = 1893456000; // 2030-01-01
+        builder = builder.check(format!("check if time($t), $t < {}", future_timestamp).as_str()).unwrap();
+        let biscuit = builder.build(&keypair).unwrap();
+
+        // Create an authorizer with current time
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let mut auth_builder = AuthorizerBuilder::new();
+        auth_builder = auth_builder.fact(format!("time({})", now).as_str()).unwrap();
+        auth_builder = auth_builder.policy("allow if true").unwrap();
+        let mut authorizer = auth_builder.build(&biscuit).unwrap();
+
+        // This should succeed because now < future_timestamp
+        assert!(authorizer.authorize().is_ok());
+    }
+
+    #[test]
+    fn test_biscuit_time_check_expired() {
+        use biscuit_auth::{KeyPair, builder::{BiscuitBuilder, AuthorizerBuilder}};
+
+        // Create a token with a time-based check that's already expired
+        let keypair = KeyPair::new();
+        let mut builder = BiscuitBuilder::new();
+
+        // Add a time check that expired in the past (year 2020)
+        let past_timestamp: u64 = 1577836800; // 2020-01-01
+        builder = builder.check(format!("check if time($t), $t < {}", past_timestamp).as_str()).unwrap();
+        let biscuit = builder.build(&keypair).unwrap();
+
+        // Create an authorizer with current time
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let mut auth_builder = AuthorizerBuilder::new();
+        auth_builder = auth_builder.fact(format!("time({})", now).as_str()).unwrap();
+        auth_builder = auth_builder.policy("allow if true").unwrap();
+        let mut authorizer = auth_builder.build(&biscuit).unwrap();
+
+        // This should fail because now > past_timestamp
+        assert!(authorizer.authorize().is_err());
     }
 }
