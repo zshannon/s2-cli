@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:crates.io)",
+      "Bash(cargo check:*)",
+      "Bash(cargo run:*)",
+      "WebFetch(domain:docs.rs)",
+      "Bash(cargo build:*)",
+      "Bash(cargo test:*)",
+      "Bash(./target/debug/s2:*)",
+      "WebFetch(domain:doc.biscuitsec.org)",
+      "Bash(./target/release/s2:*)",
+      "Bash(./target/debug/s2-lite:*)"
+    ],
+    "additionalDirectories": [
+      "/Users/zcs/Code/zshannon/2026"
+    ]
+  }
+}
