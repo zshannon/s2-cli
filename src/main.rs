@@ -70,10 +70,15 @@ async fn run() -> Result<(), CliError> {
         .with(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
+    let profile = commands.profile.as_deref().unwrap_or("default");
+
     if let Command::Config(config_cmd) = &commands.command {
         match config_cmd {
             ConfigCommand::List => {
-                let config = load_config_file()?;
+                let config = load_config_file(profile)?;
+                if profile != "default" {
+                    eprintln!("{}", format!("[profile: {}]", profile).cyan());
+                }
                 for k in ConfigKey::VARIANTS {
                     if let Ok(key) = k.parse::<ConfigKey>()
                         && let Some(v) = config.get(key)
@@ -83,13 +88,13 @@ async fn run() -> Result<(), CliError> {
                 }
             }
             ConfigCommand::Get { key } => {
-                let config = load_config_file()?;
+                let config = load_config_file(profile)?;
                 if let Some(v) = config.get(*key) {
                     println!("{}", v);
                 }
             }
             ConfigCommand::Set { key, value } => {
-                let saved_path = set_config_value(*key, value.clone())?;
+                let saved_path = set_config_value(*key, value.clone(), profile)?;
                 eprintln!("{}", format!("✓ {} set", key).green().bold());
                 eprintln!(
                     "  Configuration saved to: {}",
@@ -97,7 +102,7 @@ async fn run() -> Result<(), CliError> {
                 );
             }
             ConfigCommand::Unset { key } => {
-                let saved_path = unset_config_value(*key)?;
+                let saved_path = unset_config_value(*key, profile)?;
                 eprintln!("{}", format!("✓ {} unset", key).green().bold());
                 eprintln!(
                     "  Configuration saved to: {}",
@@ -115,7 +120,7 @@ async fn run() -> Result<(), CliError> {
         return Ok(());
     }
 
-    let cli_config = load_cli_config()?;
+    let cli_config = load_cli_config(profile)?;
     let sdk_config = sdk_config(&cli_config)?;
     let s2 = S2::new(sdk_config.clone()).map_err(CliError::SdkInit)?;
 

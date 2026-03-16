@@ -30,6 +30,9 @@ const GENERAL_USAGE: &str = color_print::cstr!(
 #[derive(Parser, Debug)]
 #[command(name = "s2", version, override_usage = GENERAL_USAGE, styles = STYLES)]
 pub struct Cli {
+    #[arg(long, global = true, env = "S2_PROFILE")]
+    pub profile: Option<String>,
+
     #[command(subcommand)]
     pub command: Command,
 }

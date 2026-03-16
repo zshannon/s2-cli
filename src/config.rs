@@ -1,4 +1,4 @@
-use std::{path::PathBuf, time::Duration};
+use std::{collections::HashMap, path::PathBuf, time::Duration};
 
 use biscuit_auth::{KeyPair, PrivateKey, builder::{Algorithm, BiscuitBuilder}};
 use config::{Config, FileFormat};
@@ -111,7 +111,7 @@ impl From<Compression> for sdk::types::Compression {
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CliConfig {
     pub access_token: Option<String>,
@@ -140,28 +140,46 @@ fn config_path() -> Result<PathBuf, CliConfigError> {
     Ok(path)
 }
 
-pub fn load_config_file() -> Result<CliConfig, CliConfigError> {
+/// Load the raw TOML as a map of profiles. Falls back to treating a flat
+/// (legacy) config as the "default" profile.
+fn load_all_profiles() -> Result<HashMap<String, CliConfig>, CliConfigError> {
     let path = config_path()?;
     if !path.exists() {
-        return Ok(CliConfig::default());
+        return Ok(HashMap::new());
     }
-    let builder = Config::builder().add_source(config::File::new(
-        path.to_str().expect("config path is valid utf8"),
-        FileFormat::Toml,
-    ));
-    Ok(builder.build()?.try_deserialize::<CliConfig>()?)
+    let contents = std::fs::read_to_string(&path).map_err(CliConfigError::Write)?;
+
+    // Try profiled format first (map of sections).
+    if let Ok(profiles) = toml::from_str::<HashMap<String, CliConfig>>(&contents) {
+        return Ok(profiles);
+    }
+
+    // Fall back to flat (legacy) format — treat as "default" profile.
+    let config: CliConfig = toml::from_str(&contents)
+        .map_err(|e| config::ConfigError::FileParse { uri: Some(path.display().to_string()), cause: Box::new(e) })?;
+    let mut map = HashMap::new();
+    map.insert("default".to_string(), config);
+    Ok(map)
 }
 
-pub fn load_cli_config() -> Result<CliConfig, CliConfigError> {
-    let path = config_path()?;
-    let mut builder = Config::builder();
-    if path.exists() {
-        builder = builder.add_source(config::File::new(
-            path.to_str().expect("config path is valid utf8"),
-            FileFormat::Toml,
-        ));
-    }
-    builder = builder.add_source(config::Environment::with_prefix("S2"));
+pub fn load_config_file(profile: &str) -> Result<CliConfig, CliConfigError> {
+    let profiles = load_all_profiles()?;
+    Ok(profiles.into_iter()
+        .find(|(k, _)| k == profile)
+        .map(|(_, v)| v)
+        .unwrap_or_default())
+}
+
+pub fn load_cli_config(profile: &str) -> Result<CliConfig, CliConfigError> {
+    let file_config = load_config_file(profile)?;
+
+    // Serialize the profile config back to TOML, then layer env vars on top
+    // via the `config` crate so S2_* env vars override profile values.
+    let file_toml = toml::to_string(&file_config).map_err(CliConfigError::Serialize)?;
+
+    let builder = Config::builder()
+        .add_source(config::File::from_str(&file_toml, FileFormat::Toml))
+        .add_source(config::Environment::with_prefix("S2"));
     Ok(builder.build()?.try_deserialize::<CliConfig>()?)
 }
 
@@ -225,29 +243,32 @@ impl CliConfig {
     }
 }
 
-pub fn save_cli_config(config: &CliConfig) -> Result<PathBuf, CliConfigError> {
+pub fn save_cli_config(config: &CliConfig, profile: &str) -> Result<PathBuf, CliConfigError> {
     let path = config_path()?;
 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(CliConfigError::Write)?;
     }
 
-    let toml = toml::to_string(config).map_err(CliConfigError::Serialize)?;
+    let mut profiles = load_all_profiles().unwrap_or_default();
+    profiles.insert(profile.to_string(), config.clone());
+
+    let toml = toml::to_string(&profiles).map_err(CliConfigError::Serialize)?;
     std::fs::write(&path, toml).map_err(CliConfigError::Write)?;
 
     Ok(path)
 }
 
-pub fn set_config_value(key: ConfigKey, value: String) -> Result<PathBuf, CliConfigError> {
-    let mut config = load_config_file().unwrap_or_default();
+pub fn set_config_value(key: ConfigKey, value: String, profile: &str) -> Result<PathBuf, CliConfigError> {
+    let mut config = load_config_file(profile).unwrap_or_default();
     config.set(key, value)?;
-    save_cli_config(&config)
+    save_cli_config(&config, profile)
 }
 
-pub fn unset_config_value(key: ConfigKey) -> Result<PathBuf, CliConfigError> {
-    let mut config = load_config_file().unwrap_or_default();
+pub fn unset_config_value(key: ConfigKey, profile: &str) -> Result<PathBuf, CliConfigError> {
+    let mut config = load_config_file(profile).unwrap_or_default();
     config.unset(key);
-    save_cli_config(&config)
+    save_cli_config(&config, profile)
 }
 
 pub fn sdk_config(config: &CliConfig) -> Result<S2Config, CliError> {

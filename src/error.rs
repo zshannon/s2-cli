@@ -216,4 +216,10 @@ pub enum CliConfigError {
          Generate one with `s2 keygen`."
     ))]
     InvalidSigningKey(String),
+
+    #[error("Profile '{0}' not found in config file")]
+    #[diagnostic(help(
+        "Run `s2 --profile {0} config set access_token <token>` to create this profile."
+    ))]
+    ProfileNotFound(String),
 }

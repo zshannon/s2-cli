@@ -283,3 +283,126 @@ fn token_without_signing_key_fails() {
         .failure()
         .stderr(predicate::str::contains("signing_key is missing"));
 }
+
+#[test]
+#[serial]
+fn profile_set_and_get() {
+    // Set a value in the "testprofile" profile
+    s2().args(["--profile", "testprofile", "config", "set", "compression", "gzip"])
+        .assert()
+        .success();
+
+    // Get it back from the same profile
+    s2().args(["--profile", "testprofile", "config", "get", "compression"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("gzip"));
+
+    // Clean up
+    s2().args(["--profile", "testprofile", "config", "unset", "compression"])
+        .assert()
+        .success();
+}
+
+#[test]
+#[serial]
+fn profile_isolation() {
+    // Set different values in default and a named profile
+    s2().args(["config", "set", "compression", "zstd"])
+        .assert()
+        .success();
+    s2().args(["--profile", "other", "config", "set", "compression", "gzip"])
+        .assert()
+        .success();
+
+    // Default profile should have zstd
+    s2().args(["config", "get", "compression"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("zstd"));
+
+    // Other profile should have gzip
+    s2().args(["--profile", "other", "config", "get", "compression"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("gzip"));
+
+    // Clean up
+    s2().args(["config", "unset", "compression"]).assert().success();
+    s2().args(["--profile", "other", "config", "unset", "compression"])
+        .assert()
+        .success();
+}
+
+#[test]
+#[serial]
+fn profile_list_shows_header() {
+    s2().args(["--profile", "myprofile", "config", "set", "compression", "gzip"])
+        .assert()
+        .success();
+
+    // Non-default profile list should show profile header
+    s2().args(["--profile", "myprofile", "config", "list"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("[profile: myprofile]"));
+
+    // Default profile list should NOT show profile header
+    s2().args(["config", "list"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("[profile:").not());
+
+    // Clean up
+    s2().args(["--profile", "myprofile", "config", "unset", "compression"])
+        .assert()
+        .success();
+}
+
+#[test]
+#[serial]
+fn profile_via_env_var() {
+    s2().args(["--profile", "envtest", "config", "set", "compression", "zstd"])
+        .assert()
+        .success();
+
+    // S2_PROFILE env var should select the profile
+    let mut cmd = s2();
+    cmd.env("S2_PROFILE", "envtest");
+    cmd.args(["config", "get", "compression"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("zstd"));
+
+    // Clean up
+    s2().args(["--profile", "envtest", "config", "unset", "compression"])
+        .assert()
+        .success();
+}
+
+#[test]
+#[serial]
+fn profile_flag_overrides_env_var() {
+    s2().args(["--profile", "fromflag", "config", "set", "compression", "gzip"])
+        .assert()
+        .success();
+    s2().args(["--profile", "fromenv", "config", "set", "compression", "zstd"])
+        .assert()
+        .success();
+
+    // --profile flag should win over S2_PROFILE env var
+    let mut cmd = s2();
+    cmd.env("S2_PROFILE", "fromenv");
+    cmd.args(["--profile", "fromflag", "config", "get", "compression"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("gzip"));
+
+    // Clean up
+    s2().args(["--profile", "fromflag", "config", "unset", "compression"])
+        .assert()
+        .success();
+    s2().args(["--profile", "fromenv", "config", "unset", "compression"])
+        .assert()
+        .success();
+}
