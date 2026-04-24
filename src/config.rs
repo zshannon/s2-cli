@@ -85,7 +85,7 @@ fn create_admin_token(root_key_str: &str) -> Result<(String, sdk::types::Signing
     let token_bytes = biscuit
         .to_vec()
         .map_err(|e| CliConfigError::InvalidSigningKey(format!("biscuit serialize: {}", e)))?;
-    let token_base64 = base64ct::Base64::encode_string(&token_bytes);
+    let token_base64 = base64ct::Base64Url::encode_string(&token_bytes);
 
     // Create SDK signing key
     let signing_key = sdk::types::SigningKey::from_base58(root_key_str)
